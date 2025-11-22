@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>OpenMRS Context</title>
+</head>
+<body>
+<h1>OpenMRS Data Model Context</h1>
+<p><strong>System:</strong> OpenMRS (Open Medical Record System). Open-source EMR for resource-constrained environments. Modular plugin architecture.</p>
+<p><strong>Tech Stack:</strong> Java, Spring Framework, Hibernate ORM, MySQL/PostgreSQL, Maven, REST API (FHIR support).</p>
+
+<h2>Core Architecture: EAV Model</h2>
+<p>OpenMRS uses <strong>Entity-Attribute-Value (EAV)</strong> for flexible clinical data storage without schema changes.</p>
+<ul>
+<li><strong>Entity:</strong> Patient or Encounter</li>
+<li><strong>Attribute:</strong> Concept (the question, e.g., "Temperature")</li>
+<li><strong>Value:</strong> Obs (the answer, e.g., "37.5")</li>
+</ul>
+<p>Sparse matrix design - only non-null values stored. Also used in person_attribute, location_attribute, provider_attribute, visit_attribute for custom extensions.</p>
+
+<h2>Key Domains & Tables</h2>
+
+<h3>1. Person, Patient, User, Provider</h3>
+<ul>
+<li><strong>Person (person):</strong> Base entity. Names (person_name), addresses (person_address), demographics (birthdate, gender).</li>
+<li><strong>Patient (patient):</strong> Clinical role linked to person_id. Identifiers (patient_identifier) like Medical Record Numbers.</li>
+<li><strong>User (users):</strong> System account credentials. Links to person_id. Role-based privileges.</li>
+<li><strong>Provider (provider):</strong> Healthcare worker. May link to full Person or simple name/ID.</li>
+</ul>
+
+<h3>2. Concept Dictionary (concept)</h3>
+<p>Backbone of EAV model. Defines all medical terms (questions and answers).</p>
+<ul>
+<li><strong>Structure:</strong> concept_id, datatype (Numeric, Coded, Text, Date, Boolean), class (Diagnosis, Test, Drug, Finding).</li>
+<li><strong>Coded Concepts:</strong> Answers link to other Concepts (Q: "Malaria Test Result", A: "Positive").</li>
+<li><strong>Concept Names (concept_name):</strong> Multi-language support. Locale-specific names per concept.</li>
+<li><strong>CIEL:</strong> Standard curated concept dictionary used in most implementations.</li>
+<li><strong>Mapping:</strong> Concepts map to external terminologies (SNOMED, ICD-10, LOINC, RxNorm).</li>
+</ul>
+
+<h3>3. Clinical Data (obs, encounter, visit)</h3>
+<ul>
+<li><strong>Visit (visit):</strong> Top-level grouping. Entire care episode (e.g., "Outpatient Visit Nov 22"). Links to patient, location, visit_type.</li>
+<li><strong>Encounter (encounter):</strong> Specific interaction within Visit (e.g., "Vitals Check", "Consultation"). Links to patient, visit, encounter_type, location, provider.</li>
+<li><strong>Observation (obs):</strong> Atomic clinical data unit.
+<ul>
+<li>person_id: Subject</li>
+<li>concept_id: What is measured</li>
+<li>encounter_id: Context</li>
+<li>value_*: Result columns - value_numeric, value_coded (FK to concept), value_text, value_datetime, value_boolean</li>
+<li>obs_group_id: Groups related observations (e.g., blood pressure systolic/diastolic)</li>
+</ul>
+</li>
+</ul>
+
+<h3>4. Orders (orders)</h3>
+<p>Instructions for patient care. Base table with subtypes:</p>
+<ul>
+<li><strong>Drug Order (drug_order):</strong> Medication prescriptions. Links to Concept or specific Drug formulation. Dose, frequency, duration.</li>
+<li><strong>Test Order (test_order):</strong> Lab/diagnostic requests.</li>
+<li><strong>Order Type:</strong> Categorizes orders (Drug Order, Test Order, Referral).</li>
+</ul>
+
+<h3>5. Forms & Metadata</h3>
+<ul>
+<li><strong>Form (form):</strong> Data entry template. Creates encounter with multiple observations on submission.</li>
+<li><strong>Location (location):</strong> Physical place. Supports hierarchy (ward within clinic). Can be retired.</li>
+<li><strong>Encounter Type (encounter_type):</strong> Categorizes encounters (Vitals, Consultation, Admission).</li>
+<li><strong>Visit Type (visit_type):</strong> Categorizes visits (Outpatient, Inpatient).</li>
+</ul>
+
+<h2>SQL Query Logic (Critical for AI)</h2>
+<ul>
+<li><strong>Join Pattern:</strong> obs → concept → concept_name (for question labels). obs → concept (via value_coded) → concept_name (for coded answers).</li>
+<li><strong>Voiding:</strong> Soft delete. NEVER physically delete. Sets voided = 1, voided_by, date_voided, void_reason. <strong>ALWAYS filter WHERE voided = 0</strong> in queries.</li>
+<li><strong>Retired:</strong> Metadata (concepts, locations, encounter_types) uses retired = 1 instead of voided. <strong>Filter WHERE retired = 0</strong> for active metadata.</li>
+<li><strong>Obs Groups:</strong> Use obs_group_id to find related observations. Parent obs has no value, only links children.</li>
+<li><strong>Latest Obs:</strong> Use MAX(obs_datetime) or ORDER BY obs_datetime DESC LIMIT 1 to get most recent value.</li>
+</ul>
+
+<h2>REST API Essentials</h2>
+<p>Endpoint: /openmrs/ws/rest/v1/</p>
+<ul>
+<li><strong>Resources:</strong> patient, encounter, obs, concept, order, provider, location, visit, form, user, role, privilege</li>
+<li><strong>Representations:</strong> ref (minimal), default (standard), full (complete with audit)</li>
+<li><strong>Auth:</strong> HTTP Basic</li>
+<li><strong>Operations:</strong> GET (search/read), POST (create/update), DELETE (void/retire)</li>
+<li><strong>Search:</strong> Query params like q=searchTerm, patient=uuid</li>
+</ul>
+
+<h2>Modules & Extensibility</h2>
+<p>.omod files extend core via Spring plugin system. Full API access via Context singleton.</p>
+<ul>
+<li><strong>Common Modules:</strong> HTML Form Entry, REST Web Services, Reporting, Address Hierarchy, Metadata Mapping</li>
+<li><strong>Service Layer:</strong> PatientService, EncounterService, ConceptService, ObsService provide business logic</li>
+<li><strong>Permissions:</strong> Privilege-based. Roles contain privileges (can inherit). Enforced via Spring AOP.</li>
+</ul>
+
+<h2>Key Principles</h2>
+<ul>
+<li>Metadata-driven: Customize via concepts/forms without code changes</li>
+<li>Semantic interoperability: Strong coded data via concept dictionary</li>
+<li>Audit trails: Void/retire, never purge in production</li>
+<li>International: Multi-language, locale support, local adaptation required</li>
+</ul>
+
+<h2>Common Use Cases</h2>
+<p>Primary care EMR. HIV/TB program tracking. Lab/pharmacy systems. Mobile health data collection. Health information exchange. Clinical decision support. Cohort reporting/analytics.</p>
+</body>
+</html>
