@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>OpenMRS 3 Context </title>
+</head>
+<body>
+<h1>OpenMRS 3 (O3) Technical Context</h1>
+<p><strong>System:</strong> OpenMRS is an enterprise open-source EMR. <strong>O3</strong> is a modern React-based frontend framework, runs on <strong>Platform</strong> (Java backend with APIs). O3 requires Platform v2.3+.</p>
+
+<h2>1. Frontend Architecture</h2>
+<p><strong>Framework:</strong> React, TypeScript, Single-SPA, Webpack 5 module federation, Carbon Design System.</p>
+<p><strong>App Shell:</strong> Base application managing routing, auth, module loading, extensions, global state, service worker (offline mode).</p>
+<p><strong>ESM (Microfrontends):</strong> Independent npm packages (e.g., <code>@openmrs/esm-patient-chart-app</code>). Loaded on-demand via <strong>Import Map</strong> JSON at <code>/openmrs/spa/importmap.json</code>. Each ESM exports activator and lifecycle functions. Loaded via Webpack module federation.</p>
+<p><strong>Extension System:</strong> UI customized via named <strong>Slots</strong> and <strong>Extensions</strong> (JSON config). No code forks required.</p>
+<p><strong>Configuration:</strong> Each ESM defines <code>config-schema.ts</code>. Implementer Tools UI allows in-browser configuration at runtime.</p>
+
+<h2>2. Backend Architecture</h2>
+<p><strong>Stack:</strong> Java 11+, Spring Framework, Hibernate 5+, MySQL 8+ or PostgreSQL. Modular (OMOD files are deployable plugins).</p>
+<p><strong>Database:</strong> Centralized. Platform agnostic (MySQL/PostgreSQL). O3 frontend is stateless; all state persists in backend DB.</p>
+
+<h2>3. EAV Data Model (Entity-Attribute-Value)</h2>
+<p><strong>CRITICAL:</strong> Data storage is sparse. Never assume table columns exist (e.g., <code>patient.blood_pressure</code> does not exist as a column).</p>
+<p><strong>Pattern:</strong> Clinical observations stored as concept-value pairs via the obs table.</p>
+<ul>
+<li><strong>Entity:</strong> <code>patient</code> (clinical subject), <code>encounter</code> (context/event)</li>
+<li><strong>Attribute:</strong> <code>concept</code> (the Question from concept dictionary). E.g., Concept ID 5085 = "Systolic Blood Pressure".</li>
+<li><strong>Value:</strong> <code>obs</code> table row (the Answer). Columns: <code>value_numeric</code>, <code>value_coded</code>, <code>value_text</code>, <code>value_datetime</code>.</li>
+</ul>
+
+<h3>Key Tables</h3>
+<ul>
+<li><strong>person:</strong> Base identity record. Cols: <code>person_id</code>, <code>uuid</code>, <code>birthdate</code>, <code>gender</code>, <code>dead</code>. IDs ≤ 0 = system users.</li>
+<li><strong>patient:</strong> Clinical role. FK <code>person_id</code>. Patient identifiers (MRN) in <code>patient_identifier</code> table.</li>
+<li><strong>visit:</strong> Episode of care. Cols: <code>visit_id</code>, <code>patient_id</code>, <code>visit_type_id</code>, <code>location_id</code>, <code>start_datetime</code>, <code>stop_datetime</code>.</li>
+<li><strong>encounter:</strong> Clinical interaction within visit. Cols: <code>encounter_id</code>, <code>patient_id</code>, <code>visit_id</code>, <code>encounter_type_id</code>, <code>provider_id</code>, <code>location_id</code>, <code>encounter_datetime</code>.</li>
+<li><strong>obs:</strong> Atomic clinical data. Cols: <code>obs_id</code>, <code>person_id</code>, <code>concept_id</code> (FK), <code>encounter_id</code>, <code>obs_group_id</code> (parent obs for grouped data), <code>obs_datetime</code>, <code>value_numeric</code>, <code>value_coded</code>, <code>value_text</code>, <code>value_datetime</code>, <code>voided</code>. Parent obs can group children (e.g., Systolic + Diastolic BP).</li>
+<li><strong>concept:</strong> Dictionary terms. Cols: <code>concept_id</code>, <code>datatype_id</code> (Numeric, Coded, Text, Date), <code>class_id</code> (Diagnosis, Lab, Procedure, Finding, Drug).</li>
+<li><strong>concept_name:</strong> Localized concept labels. Cols: <code>concept_id</code>, <code>name</code>, <code>locale</code>, <code>concept_name_type</code> (FULLY_SPECIFIED, SYNONYM, INDEX_TERM), <code>voided</code>.</li>
+<li><strong>orders:</strong> Base for prescriptions/tests. Subtypes: <code>drug_order</code> (prescriptions), <code>test_order</code> (lab requests).</li>
+<li><strong>location:</strong> Facilities. Cols: <code>location_id</code>, <code>name</code>, <code>parent_location_id</code> (hierarchy).</li>
+<li><strong>provider:</strong> Clinicians. Cols: <code>provider_id</code>, <code>person_id</code> (FK), <code>identifier</code>.</li>
+</ul>
+
+<h3>SQL Rules</h3>
+<ul>
+<li><strong>Soft Deletes (MANDATORY):</strong> Always filter <code>WHERE voided = 0</code> for obs, encounter, visit, patient, person, orders. Always filter <code>WHERE retired = 0</code> for metadata (concept, location, encounter_type, visit_type, concept_name).</li>
+<li><strong>Concept Names:</strong> Join <code>obs.concept_id</code> → <code>concept_name.concept_id</code> filtering <code>concept_name_type = 'FULLY_SPECIFIED'</code> and <code>locale</code> (e.g., 'en').</li>
+<li><strong>Coded Answer Names:</strong> Join <code>obs.value_coded</code> → <code>concept_name.concept_id</code> using same filters.</li>
+<li><strong>Latest Obs:</strong> <code>ORDER BY obs_datetime DESC LIMIT 1</code>. Never order by <code>obs_id</code>; datetime-based sorting is required.</li>
+<li><strong>Obs Groups:</strong> Parent has <code>obs_group_id = NULL</code>, no <code>value_*</code>. Children reference parent via <code>obs_group_id</code>. Query children: <code>WHERE obs_group_id = {parent_obs_id}</code>.</li>
+<li><strong>UUIDs:</strong> All entities have <code>uuid</code> column. APIs use UUIDs, not integer IDs.</li>
+<li><strong>Datetime Fields:</strong> Stored UTC. <code>obs_datetime</code>, <code>encounter_datetime</code>, <code>start_datetime</code>, <code>stop_datetime</code> guide temporal queries.</li>
+</ul>
+
+<h2>4. APIs</h2>
+<p><strong>FHIR R4 (Preferred):</strong> <code>/openmrs/ws/fhir2/R4/{resource}</code>. Resources: Patient, Encounter, Observation, Condition, MedicationRequest, ServiceRequest, Practitioner, Location, Organization. Features: pagination, search filters, includes. Use for: external integrations, standards compliance, O3 frontend.</p>
+<p><strong>REST API (Admin/Legacy):</strong> <code>/openmrs/ws/rest/v1/{resource}</code>. Resources: concept, location, encountertype, visittype, provider, user. Representations: <code>?v=default</code>, <code>?v=full</code>. Use for: metadata, admin config, non-FHIR resources.</p>
+
+<h2>5. Backend Modules (Required)</h2>
+<ul>
+<li><strong>webservices.rest:</strong> v2.24+. Provides REST API.</li>
+<li><strong>fhir2:</strong> v1.2+. FHIR R4 API. Translation layer between FHIR and OpenMRS EAV model.</li>
+<li><strong>SPA:</strong> v1.0.8+. Serves O3 frontend at <code>/openmrs/spa</code>.</li>
+<li><strong>Initializer (Iniz):</strong> Config-as-code. Loads metadata (Concepts, Locations, EncounterTypes, Roles, Privileges) from JSON on startup.</li>
+</ul>
+
+<h2>6. Frontend ESM Repositories</h2>
+<ul>
+<li><strong>openmrs-esm-core:</strong> App shell, @openmrs/esm-framework (core libs), devtools, implementer-tools, login, offline-tools.</li>
+<li><strong>openmrs-esm-patient-chart:</strong> Dashboard widgets: allergies, conditions, medications, vitals, biometrics, forms, test results, notes, attachments, programs, appointments.</li>
+<li><strong>openmrs-esm-patient-management:</strong> Patient search, registration, lists, appointments, service queues, active visits, ward mgmt.</li>
+<li><strong>openmrs-esm-home:</strong> Home page, navigation.</li>
+<li><strong>Other:</strong> Form Builder, Cohort Builder, Dispensing, Fast Data Entry, Admin Tools.</li>
+</ul>
+
+<h2>7. Forms System</h2>
+<p><strong>React Form Engine:</strong> JSON schema-based (questions, pages, sections, validation, conditional rendering, field types). Form Builder UI generates/edits schema. Submits to <code>/obs</code> or FHIR APIs.</p>
+
+<h2>8. Key Principles</h2>
+<ul>
+<li><strong>Sparse Data:</strong> No direct columns for clinical data; use EAV (concept/obs) always.</li>
+<li><strong>Soft Deletes:</strong> Never query without voided/retired filters; data is logically deleted, not purged.</li>
+<li><strong>Localization:</strong> Concept names, form labels multi-locale. Always filter by locale in queries.</li>
+<li><strong>Modularity:</strong> O3 is composable ESMs + flexible backend. No monolithic UI.</li>
+<li><strong>Standards:</strong> FHIR R4 for interop, REST for admin.</li>
+<li><strong>UUID-Based:</strong> All APIs use UUIDs, not integer IDs.</li>
+<li><strong>Audit Trails:</strong> <code>voided</code>, <code>retired</code>, <code>date_created</code>, <code>changed_by</code>, <code>date_changed</code> columns on most tables.</li>
+</ul>
+
+</body>
+</html>
